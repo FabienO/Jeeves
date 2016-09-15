@@ -116,7 +116,6 @@ class PollManager {
 
     private function updatePollList(PollData $poll, Command $command)
     {
-        echo "\n\nUpdating Poll List\n\n";
         $newPollList    = false;
         $newPoll        = true;
 
