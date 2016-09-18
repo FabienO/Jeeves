@@ -5,6 +5,7 @@ namespace Room11\Jeeves\Plugins;
 use Room11\Jeeves\Chat\Client\ChatClient;
 use Room11\Jeeves\Chat\Message\Command;
 use Room11\Jeeves\Chat\Client\Chars;
+use Room11\Jeeves\Chat\Client\PostFlags;
 use Room11\Jeeves\System\PluginCommandEndpoint;
 use Room11\Jeeves\Storage\KeyValue as KeyValueStore;
 
@@ -63,7 +64,7 @@ class PollManager {
         2 => 'Poll with that title already exists.',
         3 => 'Poll created.',
         4 => 'Invalid format. Example: !!poll vote <pole name> <answer id>',
-        5 => 'You\'ve already voted on this poll scallywag!',
+        5 => 'You\'ve already voted on this poll you scallywag!',
         6 => 'Couldn\'t find a matching answer. Dispatching dogs that shoot bees out their mouths when they bark.',
         7 => 'Vote added.',
         8 => 'Poll does not exist',
@@ -90,11 +91,11 @@ class PollManager {
 
         $pollValidation = $this->pollValidator->validatePoll($pollInfo);
         if ($pollValidation !== true) {
-            return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[$pollValidation]);
+            return yield $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[$pollValidation]);
         }
 
         if (true === yield $this->storage->exists(md5(strtolower($pollInfo['title'])), $command->getRoom())) {
-            return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[2]);
+            return yield $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[2]);
         }
 
         $modifiedOptions = [];
@@ -103,15 +104,17 @@ class PollManager {
         });
 
         $poll = new PollData();
-        $poll->key          = trim(md5(strtolower($pollInfo['title'])));
+        $poll->key          = md5(trim(strtolower($pollInfo['title'])));
         $poll->title        = $pollInfo['title'];
         $poll->options      = $modifiedOptions;
         $poll->question     = $pollInfo['question'];
 
-        $this->storage->set($poll->key, $poll, $command->getRoom());
+        print_r($poll);
+
+        $this->storage->set($poll->key, (array) $poll, $command->getRoom());
         yield from $this->updatePollList($poll, $command);
 
-        return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[3]);
+        yield $this->chatClient->postMessage($command->getRoom(), $poll->title . ' - ' . self::RESPONSES[3]);
     }
 
     private function updatePollList(PollData $poll, Command $command)
@@ -160,13 +163,13 @@ class PollManager {
 
         $validationResult = $this->pollValidator->validateVote($pollName, $voteAnswerId, $command);
         if ($validationResult !== true) {
-            return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[$validationResult]);
+            return yield $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[$validationResult]);
         }
 
         $voteAnswerId = ($voteAnswerId - 1); // To account for index starting at 0
         $answerFound = false;
         if (in_array($command->getUserId(), yield from $this->getRecordedVotes($pollName, $command))) {
-            return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[5]);
+            return yield $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[5]);
         }
 
         $poll = yield $this->storage->get(md5($pollName), $command->getRoom());
@@ -178,14 +181,14 @@ class PollManager {
         });
 
         if ($answerFound == false) {
-            return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[6]);
+            return yield $this->chatClient->postMessage($command->getRoom(), $command->getUserName() . ' ' . self::RESPONSES[6]);
         }
 
         $recordedVotes[] = $command->getUserId();
         $this->storage->set($pollName.'-votes', $recordedVotes, $command->getRoom());
         $this->storage->set($poll['key'], $poll, $command->getRoom());
 
-        return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[7]);
+        yield $this->chatClient->postMessage($command->getRoom(), $command->getUserName() . ' ' . self::RESPONSES[7]);
     }
 
     private function getRecordedVotes($title, Command $command)
@@ -200,44 +203,68 @@ class PollManager {
     public function getPoll($pollKey, Command $command): \Generator
     {
         if (false === yield $this->storage->exists(strtolower($pollKey), $command->getRoom())) {
-            return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[8]);
+            return yield $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[8]);
         }
 
         $poll = yield $this->storage->get($pollKey, $command->getRoom());
 
-        $result = $poll['question'] . "\n";
-        foreach ($poll['options'] as $option) {
-            $result .= $option['score'] .  " - ". $option['answer'] . "\n";
+        yield $this->chatClient->postMessage($command->getRoom(), $poll['question']);
+        yield $this->chatClient->postMessage($command->getRoom(), $this->formatResult($poll), PostFlags::FIXED_FONT);
+    }
+
+    private function formatResult(array $poll) : string
+    {
+        $result = '';
+        $maxScore = 0;
+        foreach ($poll['options'] as $k => $option) {
+            if ($option['score'] > $maxScore) {
+                $maxScore = $option['score'];
+            }
+        }
+        foreach ($poll['options'] as $k => $option) {
+            $result .= ($k+1) .  " | ". str_pad('', $option['score'], '#', STR_PAD_RIGHT);
+            $result .= str_pad('', ($maxScore - $option['score']), ' ', STR_PAD_LEFT);
+            $result .= ' (' . $option['score'] . ') ';
+
+            $result .= $option['score'] < 10
+            ? ' '
+            : '';
+
+            $result .= strlen($option['answer']) < 50
+                ? $option['answer']
+                : substr($option['answer'], 50) . '...';
+
+            $result .= "\n";
         }
 
-        return $this->chatClient->postMessage($command->getRoom(), $result);
+        return $result;
     }
 
     public function getPolls(Command $command): \Generator
     {
         $result = '';
         if (false === yield $this->storage->exists('pollList', $command->getRoom())) {
-            return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[9]);
+            return yield $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[9]);
         }
 
         $pollList = yield $this->storage->get('pollList', $command->getRoom());
         foreach ($pollList as $poll) {
-            $result = Chars::BULLET . " **" . $poll['title'] . "** - " . $poll['question'] . "\n";
+            $result .= Chars::BULLET . " " . $poll['title'] . " - " . $poll['question'] . "\n";
         }
 
-        return $this->chatClient->postMessage($command->getRoom(), $result);
+        yield $this->chatClient->postMessage($command->getRoom(), $result);
     }
 
     public function deletePoll($pollKey, $title, Command $command): \Generator
     {
         if (false === yield $this->storage->exists(strtolower($pollKey), $command->getRoom())) {
-            return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[10]);
+            return yield $this->chatClient->postMessage($command->getRoom(), $title . " - " . self::RESPONSES[10]);
         }
 
         $polls = yield $this->storage->get('pollList', $command->getRoom());
         foreach ($polls as $poll) {
             if (strtolower($poll['title']) == $title && $command->getUserId() !== $poll['uid']) {
-                return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[11]);
+                return yield $this->chatClient->postMessage($command->getRoom(), $title . " - " . self::RESPONSES[11]);
             }
         }
 
@@ -256,10 +283,10 @@ class PollManager {
 
             $this->storage->unset($title . '-votes', $command->getRoom());
 
-            return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[12]);
+            return yield $this->chatClient->postMessage($command->getRoom(), $title . ' ' .self::RESPONSES[12]);
         }
 
-        return $this->chatClient->postMessage($command->getRoom(), self::RESPONSES[12]);
+        yield $this->chatClient->postMessage($command->getRoom(), $title . ' ' . self::RESPONSES[12]);
     }
 }
 
@@ -276,7 +303,7 @@ class PollVote {
 }
 
 class PollValidator {
-    public function validateVote($pollName, $voteAnswerId, Command $command)
+    public function validateVote($pollName, $voteAnswerId)
     {
         if (
             empty($pollName)
